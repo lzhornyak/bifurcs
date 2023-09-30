@@ -8,6 +8,7 @@ from string import ascii_lowercase
 from matplotlib.contour import QuadContourSet
 from scipy import ndimage
 import contourpy
+from scipy.signal import find_peaks
 
 
 def generate_equations(bases):
@@ -73,7 +74,7 @@ def generate_equations(bases):
 
 def sample_points(equation, params, param_values=None, abs_params='', mesh_size=100):
     if param_values is None:
-        param_values = np.random.randn(len(params)).clip(-2, 2)
+        param_values = np.random.randn(len(params)).clip(-1, 1)
     for p, pv in zip(params, param_values):
         if p in abs_params: pv = abs(pv)
         equation = equation.replace(p, str(pv))
@@ -84,7 +85,7 @@ def sample_points(equation, params, param_values=None, abs_params='', mesh_size=
     def f(r, x):
         return eval(equation)
 
-    points = np.meshgrid(np.linspace(-2, 2, mesh_size), np.linspace(-10, 10, mesh_size))
+    points = np.meshgrid(np.linspace(-1, 1, mesh_size), np.linspace(-5, 5, mesh_size))
     # res = QuadContourSet(points[0], points[1], f(points[0], points[1]), levels=[0])
     # plt.xlabel('r')
     # plt.ylabel('x')
@@ -94,13 +95,16 @@ def sample_points(equation, params, param_values=None, abs_params='', mesh_size=
 
 def split_lines(sequence, deadzone=3):
     # split sequence into monotonic segments
-    smoothed = ndimage.gaussian_filter1d(sequence[:, 0].copy(), 3)
-    splits = np.where(np.diff(np.sign(np.diff(smoothed))))
-    splits = np.concatenate([np.array([0]), splits[0], np.array([len(sequence)])])
+    smoothed = ndimage.gaussian_filter1d(sequence.copy().T, 3)
+    second_diff = np.abs(np.diff(np.diff(smoothed)))
+    peaks_r = find_peaks(second_diff[0], prominence=second_diff[0].max()/2)[0]
+    peaks_x = find_peaks(second_diff[1], prominence=second_diff[1].max()/2)[0]
+    splits = np.concatenate([np.array([0]), peaks_x, peaks_r, np.array([len(sequence)])])
+    splits.sort()
     split_sequence = []
     for sl, sr in zip(splits[:-1], splits[1:]):
         new_seq = sequence[sl + deadzone:sr - deadzone]
-        if len(new_seq) == 0:
+        if len(new_seq) < 20:
             continue
         if new_seq[-1, 0] - new_seq[0, 0] < 0:  # flip if decreasing
             new_seq = new_seq[::-1]
@@ -143,6 +147,23 @@ def create_shape_dataframe(segments, equations):
 
 
 def generate_data(equations, n_samples=100, abs_params=''):
+    data = []
+    for i, eq in enumerate(equations):
+        if (i + 1) % 10 == 0: print('g', i + 1)
+        # generate contours of bifurcation diagram
+        equations[i], grid_points = sample_points(eq[0], eq[1], mesh_size=1000, abs_params=abs_params)
+        contour_gen = contourpy.contour_generator(*grid_points, name='threaded')
+        contours = contour_gen.lines(0)
+        # format and resample contours
+        contour_segs = []
+        for contour in contours:
+            split_contours = split_lines(contour)
+            for sc in split_contours:
+                contour_segs.append(resample_line(sc, n_samples))
+        data.append(contour_segs)
+    return data
+
+def generate_taylor_data(equations, terms=10, abs_params=''):
     data = []
     for i, eq in enumerate(equations):
         # if (i + 1) % 10 == 0: print(i + 1)
