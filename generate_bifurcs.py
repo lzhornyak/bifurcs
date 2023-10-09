@@ -11,7 +11,7 @@ import contourpy
 from scipy.signal import find_peaks
 
 
-def generate_equations(bases):
+def generate_equations(bases, append=None):
     par_bases = bases + [f'r * {s}' for s in bases]
     var_sets = [s for i in range(1, len(par_bases) + 1) for s in combinations(par_bases, i)]
     for b in bases:
@@ -21,6 +21,8 @@ def generate_equations(bases):
     for v in var_sets:
         defining_pars = ascii_lowercase[:len(v)]
         equation = ' + '.join([f'{p}*{s}' for p, s in zip(defining_pars, v)])
+        if append is not None:
+            equation = equation + ' + ' + append
         # equation = equation + ' - 0.01*x**5'  # ensure bounded solutions
         equations.append((equation, defining_pars))
     return equations
@@ -93,21 +95,30 @@ def sample_points(equation, params, param_values=None, abs_params='', mesh_size=
     return equation, (points[0], points[1], f(points[0], points[1]))
 
 
-def split_lines(sequence, deadzone=3):
+def split_lines(sequence, deadzone=1):
     # split sequence into monotonic segments
     smoothed = ndimage.gaussian_filter1d(sequence.copy().T, 3)
     second_diff = np.abs(np.diff(np.diff(smoothed)))
-    peaks_r = find_peaks(second_diff[0], prominence=second_diff[0].max()/2)[0]
-    peaks_x = find_peaks(second_diff[1], prominence=second_diff[1].max()/2)[0]
+    try:
+        peaks_r = find_peaks(second_diff[0], prominence=second_diff[0].max()/2)[0]
+    except ValueError:
+        peaks_r = []
+    try:
+        peaks_x = find_peaks(second_diff[1], prominence=second_diff[1].max()/2)[0]
+    except ValueError:
+        peaks_x = []
     splits = np.concatenate([np.array([0]), peaks_x, peaks_r, np.array([len(sequence)])])
     splits.sort()
     split_sequence = []
     for sl, sr in zip(splits[:-1], splits[1:]):
-        new_seq = sequence[sl + deadzone:sr - deadzone]
-        if len(new_seq) < 20:
+        try:
+            new_seq = sequence[sl + deadzone:sr - deadzone]
+            if len(new_seq) < 20:
+                continue
+            if new_seq[-1, 0] - new_seq[0, 0] < 0:  # flip if decreasing
+                new_seq = new_seq[::-1]
+        except TypeError:
             continue
-        if new_seq[-1, 0] - new_seq[0, 0] < 0:  # flip if decreasing
-            new_seq = new_seq[::-1]
         split_sequence.append(new_seq)
     return split_sequence
 

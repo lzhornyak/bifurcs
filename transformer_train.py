@@ -11,10 +11,10 @@ import pytorch_lightning as pl
 from bifurc_transformer import *
 
 
-def simulate(equation, n=100):
+def simulate(equation, n=200, n_simul=400):
     f = eval('lambda x, t, r: ' + equation)
     x0 = np.random.rand(n) * 10 - 5
-    t = np.geomspace(0.1, 10.1, 100) - 0.1
+    t = np.geomspace(0.1, 10.1, n_simul) - 0.1
     r = np.random.rand(n) * 2 - 1
     x = odeint(f, x0, t, args=(r,))
     return x.T, r
@@ -29,15 +29,17 @@ class BifurcationPredictor(pl.LightningModule):
         #                                   dim_feedforward=100, dropout=0.1, batch_first=True)
         # self.emplacer = nn.Linear(1, 100)
 
-        pos_encoding = PositionalEncoding(100)
-        encoder_layer = PosEncoderLayer(pos_encoding, d_model=100, nhead=5, dim_feedforward=500, batch_first=True)
-        self.encoder = PosEncoder(encoder_layer, num_layers=3)
+        self.n_features = 400
+        pos_encoding = PositionalEncoding(self.n_features)
+        encoder_layer = PosEncoderLayer(pos_encoding, d_model=self.n_features, nhead=10, dim_feedforward=1000, batch_first=True)
+        self.encoder = PosEncoder(encoder_layer, num_layers=4)
 
-        self.queries = nn.Embedding(20, 100)
-        decoder_layer = PosDecoderLayer(pos_encoding, d_model=100, nhead=5, dim_feedforward=500, batch_first=True)
-        self.decoder = PosDecoder(decoder_layer, num_layers=3)
+        self.n_queries = 200
+        self.queries = nn.Embedding(self.n_queries, 400)
+        decoder_layer = PosDecoderLayer(pos_encoding, d_model=self.n_features, nhead=10, dim_feedforward=1000, batch_first=True)
+        self.decoder = PosDecoder(decoder_layer, num_layers=4)
 
-        self.final_decoder = nn.Linear(100, 13)
+        self.final_decoder = nn.Linear(self.n_features, 13)
 
     def forward(self, x, r):
         # x = self.pos_encoding(x, r)
@@ -45,7 +47,7 @@ class BifurcationPredictor(pl.LightningModule):
         # x[..., -1] = r
         mem = self.encoder(x, r)
 
-        queries = self.queries(torch.arange(20, device=x.device)).expand(x.shape[0], -1, -1)
+        queries = self.queries(torch.arange(self.n_queries, device=x.device)).expand(x.shape[0], -1, -1)
         x = self.decoder(queries, mem, r)
 
         return self.final_decoder(x)
@@ -79,6 +81,9 @@ class BifurcationPredictor(pl.LightningModule):
         shape_loss = []
         for i, a in enumerate(assignments):
             params = x[i, a[1], 3:]
+            if y[i][0].numel() == 0 and y[i][1].numel() == 0:
+                shape_loss.append(torch.tensor(0, device=x.device))
+                continue
             taylor = create_taylor_vector(y[i][0][:, 0], y[i][0][:, 1], n=y[i][1].shape[1])
             pred = (params * taylor).sum(-1).T
             shape_loss.append(nn.MSELoss()(pred, y[i][1]))
@@ -96,6 +101,9 @@ class BifurcationPredictor(pl.LightningModule):
         # loss for the position prediction
         pos_loss = []
         for i, a in enumerate(assignments):
+            if y[i][0].numel() == 0:
+                pos_loss.append(torch.tensor(0, device=x.device))
+                continue
             pos_loss.append(nn.L1Loss()(x[i, a[1], 1:3], y[i][0]))
         pos_loss = torch.stack(pos_loss).mean()
 
@@ -105,7 +113,7 @@ class BifurcationPredictor(pl.LightningModule):
         simul, param, bifurcation = batch
         x = self(simul, param)
         shape_loss, pred_loss, pos_loss = self.loss(x, bifurcation)
-        loss = 10 * shape_loss + pred_loss + pos_loss
+        loss = 200 * shape_loss + pred_loss / 2 + 200 * pos_loss
         self.log("shape_loss", shape_loss, prog_bar=True)
         self.log("pred_loss", pred_loss, prog_bar=True)
         self.log("pos_loss", pos_loss, prog_bar=True)
@@ -147,19 +155,22 @@ def create_taylor_vector(x0, x1, n=100):
 
 
 if __name__ == '__main__':
-    equations = [('a*r*x - b*x**3', 'ab'), ()] * 1000
-    bifurc_data = generate_data(equations, n_samples=100, abs_params='ab')
-    data = []
-    for i, eq in enumerate(equations):
-        data.append(simulate(eq, n=100))
-        if (i + 1) % 10 == 0: print('s', i + 1)
-    simul_data, par_data = list(zip(*data))
+    try:
+        dataset = pickle.load(open('dataset.pkl', 'rb'))
+    except FileNotFoundError:
+        equations = generate_equations(['1', 'x**1', 'x**2', 'x**3'], append='-x**5') * 100
+        bifurc_data = generate_data(equations, n_samples=250, abs_params='')
+        data = []
+        for i, eq in enumerate(equations):
+            data.append(simulate(eq, n=200, n_simul=400))
+            if (i + 1) % 10 == 0: print('s', i + 1)
+        simul_data, par_data = list(zip(*data))
 
-    dataset = BifurcationData(simul_data, par_data, bifurc_data)
-    dataloader = DataLoader(dataset, batch_size=10, collate_fn=bifurcation_collate)
-    pickle.dump(dataset, open('lightning_logs/version_3/dataset.pkl', 'wb'))
+        dataset = BifurcationData(simul_data, par_data, bifurc_data)
+        pickle.dump(dataset, open('dataset.pkl', 'wb'))
+
+    dataloader = DataLoader(dataset, batch_size=20, collate_fn=bifurcation_collate)
 
     model = BifurcationPredictor()
     trainer = pl.Trainer(max_epochs=10000, accelerator='gpu', gradient_clip_val=0.1)
     trainer.fit(model, dataloader)
-    print(equations)
