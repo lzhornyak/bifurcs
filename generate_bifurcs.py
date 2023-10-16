@@ -76,7 +76,7 @@ def generate_equations(bases, append=None):
 
 def sample_points(equation, params, param_values=None, abs_params='', mesh_size=100):
     if param_values is None:
-        param_values = np.random.randn(len(params)).clip(-1, 1)
+        param_values = np.appro(len(params)).clip(-1, 1)
     for p, pv in zip(params, param_values):
         if p in abs_params: pv = abs(pv)
         equation = equation.replace(p, str(pv))
@@ -95,7 +95,7 @@ def sample_points(equation, params, param_values=None, abs_params='', mesh_size=
     return equation, (points[0], points[1], f(points[0], points[1]))
 
 
-def split_lines(sequence, deadzone=1):
+def split_lines(sequence, deadzone=0):
     # split sequence into monotonic segments
     smoothed = ndimage.gaussian_filter1d(sequence.copy().T, 3)
     second_diff = np.abs(np.diff(np.diff(smoothed)))
@@ -161,23 +161,6 @@ def generate_data(equations, n_samples=100, abs_params=''):
     data = []
     for i, eq in enumerate(equations):
         if (i + 1) % 10 == 0: print('g', i + 1)
-        # generate contours of bifurcation diagram
-        equations[i], grid_points = sample_points(eq[0], eq[1], mesh_size=1000, abs_params=abs_params)
-        contour_gen = contourpy.contour_generator(*grid_points, name='threaded')
-        contours = contour_gen.lines(0)
-        # format and resample contours
-        contour_segs = []
-        for contour in contours:
-            split_contours = split_lines(contour)
-            for sc in split_contours:
-                contour_segs.append(resample_line(sc, n_samples))
-        data.append(contour_segs)
-    return data
-
-def generate_taylor_data(equations, terms=10, abs_params=''):
-    data = []
-    for i, eq in enumerate(equations):
-        # if (i + 1) % 10 == 0: print(i + 1)
         # generate contours of bifurcation diagram
         equations[i], grid_points = sample_points(eq[0], eq[1], mesh_size=1000, abs_params=abs_params)
         contour_gen = contourpy.contour_generator(*grid_points, name='threaded')

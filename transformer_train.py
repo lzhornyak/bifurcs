@@ -39,7 +39,7 @@ class BifurcationPredictor(pl.LightningModule):
         decoder_layer = PosDecoderLayer(pos_encoding, d_model=self.n_features, nhead=10, dim_feedforward=1000, batch_first=True)
         self.decoder = PosDecoder(decoder_layer, num_layers=4)
 
-        self.final_decoder = nn.Linear(self.n_features, 13)
+        self.final_decoder = nn.Linear(self.n_features, 9)
 
     def forward(self, x, r):
         # x = self.pos_encoding(x, r)
@@ -63,8 +63,9 @@ class BifurcationPredictor(pl.LightningModule):
         for i in range(len(x)):
             if len(y[i][1]) > 0:
                 params = x[i, :, 3:]
-                taylor = create_taylor_vector(y[i][0][:, 0], y[i][0][:, 1], n=y[i][1].shape[1])
-                pred = (params * taylor.unsqueeze(-2)).sum(-1).T  # 20 x 100
+                # taylor = create_taylor_vector(y[i][0][:, 0], y[i][0][:, 1], n=y[i][1].shape[1])
+                vector = create_bezier_vector(y[i][0][:, 0], y[i][0][:, 1], n=y[i][1].shape[1])
+                pred = (params * vector.unsqueeze(-2)).sum(-1).T  # 20 x 100
 
                 targ = y[i][1].unsqueeze(0).expand(pred.shape[0], -1, -1)
                 cost_matrix = nn.MSELoss(reduction='none')(pred, targ).mean(dim=-1).T
@@ -84,8 +85,9 @@ class BifurcationPredictor(pl.LightningModule):
             if y[i][0].numel() == 0 and y[i][1].numel() == 0:
                 shape_loss.append(torch.tensor(0, device=x.device))
                 continue
-            taylor = create_taylor_vector(y[i][0][:, 0], y[i][0][:, 1], n=y[i][1].shape[1])
-            pred = (params * taylor).sum(-1).T
+            # taylor = create_taylor_vector(y[i][0][:, 0], y[i][0][:, 1], n=y[i][1].shape[1])
+            vector = create_bezier_vector(y[i][0][:, 0], y[i][0][:, 1], n=y[i][1].shape[1])
+            pred = (params * vector).sum(-1).T
             shape_loss.append(nn.MSELoss()(pred, y[i][1]))
         shape_loss = torch.stack(shape_loss).mean()
         # shape_loss = 0
@@ -152,6 +154,15 @@ def create_taylor_vector(x0, x1, n=100):
     x = torch.asarray(np.linspace(x0.cpu(), x1.cpu(), n)).float().to(x0.device)
     # return np.stack([x, x**2/2, x**3/6, x**4/24, x**5/120, x**6/720, x**7/5040, x**8/40320, x**9/362880, x**10/3628800])
     return torch.stack([x ** 0, x ** 1, x ** 2, x ** 3, x ** 4, x ** 5, x ** 6, x ** 7, x ** 8, x ** 9], dim=-1)
+
+def create_bezier_vector(x0, x1, n=100):
+    x = torch.asarray(np.linspace(x0.cpu() * 0, x1.cpu() * 0 + 1, n)).float().to(x0.device)
+    return torch.stack([(1 - x) ** 5,
+                        5 * x * (1 - x) ** 4,
+                        10 * x ** 2 * (1 - x) ** 3,
+                        10 * x ** 3 * (1 - x) ** 2,
+                        5 * x ** 4 * (1 - x),
+                        x ** 5], dim=-1)
 
 
 if __name__ == '__main__':
