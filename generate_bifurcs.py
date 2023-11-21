@@ -9,6 +9,7 @@ from matplotlib.contour import QuadContourSet
 from scipy import ndimage
 import contourpy
 from scipy.signal import find_peaks
+from scipy.special import comb
 
 
 def generate_equations(bases, append=None):
@@ -76,7 +77,7 @@ def generate_equations(bases, append=None):
 
 def sample_points(equation, params, param_values=None, abs_params='', mesh_size=100):
     if param_values is None:
-        param_values = np.appro(len(params)).clip(-1, 1)
+        param_values = np.random.randn(len(params)).clip(-1, 1)
     for p, pv in zip(params, param_values):
         if p in abs_params: pv = abs(pv)
         equation = equation.replace(p, str(pv))
@@ -100,11 +101,11 @@ def split_lines(sequence, deadzone=0):
     smoothed = ndimage.gaussian_filter1d(sequence.copy().T, 3)
     second_diff = np.abs(np.diff(np.diff(smoothed)))
     try:
-        peaks_r = find_peaks(second_diff[0], prominence=second_diff[0].max()/2)[0]
+        peaks_r = find_peaks(second_diff[0], prominence=second_diff[0].max() / 2)[0]
     except ValueError:
         peaks_r = []
     try:
-        peaks_x = find_peaks(second_diff[1], prominence=second_diff[1].max()/2)[0]
+        peaks_x = find_peaks(second_diff[1], prominence=second_diff[1].max() / 2)[0]
     except ValueError:
         peaks_x = []
     splits = np.concatenate([np.array([0]), peaks_x, peaks_r, np.array([len(sequence)])])
@@ -127,6 +128,32 @@ def resample_line(sequence, n_samples=100):
     r = np.linspace(sequence[0, 0], sequence[-1, 0], n_samples)
     x = np.interp(r, sequence[:, 0], sequence[:, 1])
     return np.stack([r, x], axis=1)
+
+
+def bernstein_polynomial(t, n):
+    poly = []
+    for i in range(n + 1):
+        poly.append(comb(n, i) * (t ** i) * (1 - t) ** (n - i))
+    return np.stack(poly, axis=1)
+
+
+def bezier_fit(sequence, order=9):
+    bounds = [sequence[0], sequence[-1]]
+    if (bounds[1] - bounds[0] == 0).any():
+        return bounds, np.array([0.] * order + [1.])
+
+    unit_seq = (sequence - bounds[0]) / (bounds[1] - bounds[0])
+    bern = bernstein_polynomial(unit_seq[:, 0], order)
+    bern_inv = np.linalg.pinv(bern)
+    params = np.array([0.] * order + [1.])  # 0 is 0 and -1 is 1
+    params[1:-1] = bern_inv[1:-1] @ unit_seq[:, 1]
+    return bounds, params
+
+
+def bezier_sim(params, n_samples=100):
+    t = np.linspace(0, 1, n_samples)
+    bern = bernstein_polynomial(t, params.shape[-1] - 1)
+    return bern @ params
 
 
 def create_points_dataframe(segments):
@@ -157,7 +184,7 @@ def create_shape_dataframe(segments, equations):
     return dataframe
 
 
-def generate_data(equations, n_samples=100, abs_params=''):
+def generate_data(equations, n_samples=100, abs_params='', bezier_order=9):
     data = []
     for i, eq in enumerate(equations):
         if (i + 1) % 10 == 0: print('g', i + 1)
@@ -170,7 +197,8 @@ def generate_data(equations, n_samples=100, abs_params=''):
         for contour in contours:
             split_contours = split_lines(contour)
             for sc in split_contours:
-                contour_segs.append(resample_line(sc, n_samples))
+                contour_segs.append(bezier_fit(sc, bezier_order))
+                # contour_segs.append(resample_line(sc, n_samples))
         data.append(contour_segs)
     return data
 
