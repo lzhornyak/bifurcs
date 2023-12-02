@@ -1,10 +1,12 @@
 # import PyDSTool as dst
 import numpy as np
 import pandas as pd
+import torch
 from matplotlib import pyplot as plt
 from itertools import combinations
 from string import ascii_lowercase
 import sympy as sp
+from scipy.interpolate import interp1d
 from tqdm import tqdm
 from mpire import WorkerPool
 from functools import partial
@@ -103,31 +105,95 @@ def bezier_sim(params, n_samples=100):
     return bern @ params
 
 
-def generate_data_single(*eq_info, mesh_size=1000, abs_params='', bezier_order=9):
+def generate_bifurc_seg_vector(s, unstable=False, n_samples=10):
+    f = interp1d(*s.T)
+    r = np.linspace(s[0, 0], s[-1, 0], n_samples)
+    if r[0] > r[-1]: r = r[::-1]
+    x = f(r)
+
+    vector = np.zeros(5 + n_samples)
+    vector[0] = unstable
+    vector[1:5] = [r[0], r[-1], x[0], x[-1]]
+    if abs(x[-1] - x[0]) < 0.01:
+        vector[5:] = np.linspace(0, 1, n_samples)
+    else:
+        vector[5:] = (x - x[0]) / (x[-1] - x[0])
+    return vector
+
+
+def unpack_bifurc_seg_vector(vector):
+    unstable = vector[0]
+    r = np.linspace(vector[1], vector[2], len(vector) - 5)
+    x = vector[5:] * (vector[4] - vector[3]) + vector[3]
+    return unstable, r, x
+
+def unpack_bifurc_pred_vector(vector):
+    conf = torch.sigmoid(vector[0]).numpy()
+    unstable = torch.sigmoid(vector[5]).numpy()
+    r = np.linspace(vector[1], vector[2], len(vector) - 3)
+    x = np.concatenate(([0], vector[6:], [1]))
+    x = vector * (vector[4] - vector[3]) + vector[3]
+    return conf, unstable, r, x
+
+def generate_data_single(*eq_data, mesh_size=1000, n_samples=10):
+    # set up equation
+    if len(eq_data) == 1:
+        eq_data = eq_data[0]
+    equation, parameters = eq_data[:2]
     r, x = sp.symbols('r, x')
-    equation, grid_points = sample_points(eq_info[0], eq_info[1], mesh_size=mesh_size, abs_params=abs_params)
-    contour_gen = contourpy.contour_generator(*grid_points, name='threaded')
+    equation = sp.sympify(equation)
+    for p in sp.symbols(parameters):
+        equation = equation.subs(p, np.random.rand() * 2 - 1)
+    f = sp.lambdify((r, x), equation, 'numpy')
+    df = sp.lambdify((r, x), sp.diff(equation, x), 'numpy')
+
+    # generate contours of bifurcation diagram
+    r, x = np.meshgrid(np.linspace(-1, 1, mesh_size), np.linspace(-2, 2, mesh_size))
+    z = f(r, x)
+    contour_gen = contourpy.contour_generator(r, x, z, name='serial')
     contours = contour_gen.lines(0)
-    # prepare derivative to determine stability
-    stability = sp.lambdify((r, x), sp.diff(equation, x), 'numpy')
-    # format and resample contours
-    contour_segs = []
-    for contour in contours:
-        split_contours = split_lines(contour)
-        for sc in split_contours:
-            resample_line(sc, 100)
-            fitted_curve = bezier_fit(sc, bezier_order)
-            fitted_curve = [stability(*sc[len(sc) // 2]), *fitted_curve[0], *fitted_curve[1]]
-            contour_segs.append(fitted_curve)
-            # contour_segs.append(resample_line(sc, n_samples))
-    return equation, contour_segs
+
+    # find critical points on contours
+    critical_points, segments, stability = [], [], []
+    for c in contours:
+        switches = find_peaks(-np.abs(df(c[:, 0], c[:, 1])), height=-0.01, prominence=0.01)[0].astype(int)
+        switches = np.concatenate(([0], switches, [len(c) - 1]))
+        for i in range(len(switches) - 1):
+            if switches[i + 1] - switches[i] < 5:
+                continue
+            critical_points.extend([c[switches[i]], c[switches[i + 1]]])
+            segments.append(c[switches[i]:switches[i + 1]].copy())
+
+    # handle special case of no bifurcation diagram
+    if len(segments) == 0:
+        return equation, np.zeros((0, n_samples + 5))
+
+    # correct critical points and determine stability
+    critical_points = np.stack(critical_points)
+    dist = ((critical_points[:, None] - critical_points[None]) ** 2).sum(-1) ** 0.5
+    matched = (dist < 0.01).reshape(-1, 2, len(dist))
+    for s, m in zip(segments, matched):
+        s[0] = critical_points[m[0]].mean(0)
+        s[-1] = critical_points[m[1]].mean(0)
+        stability.append(df(s[:, 0], s[:, 1]).mean() > 0)
+
+    # generate vectorized data
+    data = np.zeros((len(segments), n_samples + 5))
+    for i, s in enumerate(segments):
+        # rs = generate_bifurcs.resample_line(s, 10)
+        data[i] = generate_bifurc_seg_vector(s, stability[i], n_samples)
+
+    return equation, data
 
 
-def generate_data(equations, mesh_size=1000, abs_params='', bezier_order=9):
-    map_func = partial(generate_data_single, mesh_size=mesh_size, abs_params=abs_params, bezier_order=bezier_order)
-    with WorkerPool(n_jobs=12) as pool:
-        pool_data = pool.map(map_func, equations,
-                             progress_bar=True, progress_bar_options={'desc': 'Generating bifurcations'})
+def generate_data(equations, mesh_size=1000, n_samples=10, use_mp=True):
+    map_func = partial(generate_data_single, mesh_size=mesh_size, n_samples=n_samples)
+    if use_mp:
+        with WorkerPool(n_jobs=12) as pool:
+            pool_data = pool.map(map_func, equations,
+                                 progress_bar=True, progress_bar_options={'desc': 'Generating bifurcations'})
+    else:
+        pool_data = map(map_func, tqdm(equations, desc='Generating bifurcations'))
     equations, raw_data = zip(*pool_data)
     equations, raw_data = list(equations), list(raw_data)
 
@@ -163,16 +229,16 @@ def generate_data(equations, mesh_size=1000, abs_params='', bezier_order=9):
 if __name__ == '__main__':
     # equations = generate_equations(['1', 'x**1', 'x**2', 'x**3'])
     bases = ['a01', 'a02*r',
-             'a03*(x+b/4)', 'a04*r*(x+b/4)', 'a05*(x+b/4)**2', 'a06*r*(x+b/4)**2', 'a06*(x+b/4)**3', 'a07*r*(x+b/4)**3',
-             'a08*sin(2*c01*(x+b/4))', 'a09*r*sin(2*c02*(x+b/4))',
-             'a10*sin(2*c03*r*(x+b/4))', 'a11*r*sin(2*c04*r*(x+b/4))']
+             'a03*(x+b/4)', 'a04*r*(x+b/4)', 'a05*(x+b/4)**2', 'a06*r*(x+b/4)**2', 'a06*(x+b/4)**3', 'a07*r*(x+b/4)**3']
+    # 'a08*sin(2*c01*(x+b/4))', 'a09*r*sin(2*c02*(x+b/4))',
+    # 'a10*sin(2*c03*r*(x+b/4))', 'a11*r*sin(2*c04*r*(x+b/4))']
     params = ['a01', 'a02', 'a03', 'a04', 'a05', 'a06', 'a07', 'a08', 'a09', 'a10', 'a11',
               'b', 'c01', 'c02', 'c03', 'c04']
-    equations = generate_equations(bases, params, append='-x**5')
+    equations = generate_equations(bases, params, append='-0.01*x**5')
     # print(len(equations))
     # equations = [('a*r*x - b*x**2', 'a b')] * 1
     #
-    data = generate_data(equations[:2])
+    data = generate_data(equations, use_mp=False)
     print(len(equations))
     # points_dataframe = create_points_dataframe(data)
     # shape_dataframe = create_shape_dataframe(data, equations)

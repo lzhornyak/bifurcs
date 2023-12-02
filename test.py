@@ -1,51 +1,45 @@
-from matplotlib import pyplot as plt
-from pycobi import ODESystem
-from pyrates import CircuitTemplate
+import numpy as np
+import matplotlib.pyplot as plt
 
-func_name = "vector_field"
-file_name = "system_equations"
-dt = 1e-3
-solver = "scipy"
+def euler_method(f, initial_state, t0, t1, dt, param):
+    steps = int((t1 - t0) / dt)
+    t = t0
+    state = initial_state
 
-# # initialize circuit template
-# template = CircuitTemplate.from_yaml('models.pitchfork.pitch')
-#
-# # update circuit template variables
-# template.update_var(node_vars={'node/eqn/x': 2.0, 'node/eqn/r': 0.5})
-# # template.update_var(edge_vars=kwargs.pop("edge_vars"))
-#
-# # generate fortran files
-# _, _, params, state_vars = template.get_run_func(func_name, dft, file_name=file_name, backend="fortran",
-#                                                  float_precision="float64", auto=True, vectorize=False,
-#                                                  solver=solver, NPR=100, NMX=10000)
+    states = []
+    for _ in range(steps):
+        state += dt * f(state, param)
+        t += dt
+        states.append(state)
 
-# initialize ODESystem
-ode = ODESystem(auto_dir="~/auto/07p", e=file_name, c="ivp",
-                params=['r'], state_vars=['x'], eq_file=file_name)
+    return np.array(states)
 
-# ode = ODESystem.from_yaml(
-#     "models.pitchfork.pitch", auto_dir="~/auto/07p",
-#     node_vars={'node/eqn/x': 2.0, 'node/eqn/r': 0.5},
-#     NPR=100, NMX=10000
-# )
+def plot_continuous_bifurcation_diagram(f, param_range, initial_state, t0, t1, dt, plot_duration):
+    param_min, param_max = param_range
+    param_values = np.linspace(param_min, param_max, 1000)
+    bifurcation_data = []
 
-ode.plot_continuation("t", "x", cont=0)
-plt.show()
+    for param in param_values:
+        states = euler_method(f, initial_state, t0, t1, dt, param)
+        # Collect only the last 'plot_duration' states
+        if len(states) >= plot_duration:
+            sampled_states = states[-plot_duration:]
+        else:
+            # If not enough states, repeat the last state to fill the gap
+            sampled_states = np.full(plot_duration, states[-1])
+        bifurcation_data.append(np.column_stack((np.full(plot_duration, param), sampled_states)))
 
-r_sols, r_cont = ode.run(
-    origin=0, starting_point='EP', name='r_cont', bidirectional=True,
-    ICP="r", RL0=-2.0, RL1=2.0, IPS=1, ILP=1, ISP=1, ISW=1, NTST=20,
-    NCOL=4, IAD=3, IPLT=0, NBC=0, NINT=0, NMX=100000, NPR=10, MXBF=5, IID=2,
-    ITMX=8, ITNW=5, NWTN=3, JAC=0, EPSL=1e-06, EPSU=1e-06, EPSS=1e-04,
-    DS=1e-4, DSMIN=1e-8, DSMAX=5e-4, IADS=1, THL={}, THU={}, STOP={}
-)
-ode.plot_continuation("r", "x", cont="r_cont")
-plt.show()
+    bifurcation_data = np.concatenate(bifurcation_data)
 
-# bp_sols, bp_cont = ode.run(origin=r_cont, starting_point='BP', name='bp_cont', IPS=1, ISP=1, ISW=-1)
-fig, ax = plt.subplots()
-ode.plot_continuation("r", "x", cont="r_cont", ax=ax)
-# ode.plot_continuation("r", "x", cont="bp_cont", ax=ax)
-plt.show()
-#
-# ode.close_session(clear_files=True)
+    # Plot the diagram
+    plt.plot(bifurcation_data[:, 0], bifurcation_data[:, 1], ',k', alpha=.25)
+    plt.title("Bifurcation diagram (Continuous Time)")
+    plt.xlabel("Parameter")
+    plt.ylabel("State")
+    plt.show()
+
+# Example usage with a simple differential equation
+def example_diff_eq(state, r):
+    return r * state + state ** 3 - state ** 5
+
+plot_continuous_bifurcation_diagram(example_diff_eq, (-3, 3), 0.1, 0, 100, 0.01, 1000)
