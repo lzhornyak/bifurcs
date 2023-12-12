@@ -1,4 +1,6 @@
 # import PyDSTool as dst
+import pickle
+
 import numpy as np
 import pandas as pd
 import torch
@@ -121,29 +123,25 @@ def generate_bifurc_seg_vector(s, unstable=False, n_samples=10):
     return vector
 
 
-def unpack_bifurc_seg_vector(vector):
+def unpack_bifurc_vector(vector):
     unstable = vector[0]
     r = np.linspace(vector[1], vector[2], len(vector) - 5)
     x = vector[5:] * (vector[4] - vector[3]) + vector[3]
     return unstable, r, x
 
-def unpack_bifurc_pred_vector(vector):
-    conf = torch.sigmoid(vector[0]).numpy()
-    unstable = torch.sigmoid(vector[5]).numpy()
-    r = np.linspace(vector[1], vector[2], len(vector) - 3)
-    x = np.concatenate(([0], vector[6:], [1]))
-    x = vector * (vector[4] - vector[3]) + vector[3]
-    return conf, unstable, r, x
 
-def generate_data_single(*eq_data, mesh_size=1000, n_samples=10):
+def generate_data_single(*eq_data, mesh_size=1000, n_samples=10, abs_params=''):
     # set up equation
     if len(eq_data) == 1:
         eq_data = eq_data[0]
     equation, parameters = eq_data[:2]
     r, x = sp.symbols('r, x')
+
     equation = sp.sympify(equation)
-    for p in sp.symbols(parameters):
-        equation = equation.subs(p, np.random.rand() * 2 - 1)
+    for p in parameters:
+        val = np.random.rand() * 2 - 1
+        val = abs(val) if p in abs_params else val
+        equation = equation.subs(sp.symbols(p), val)
     f = sp.lambdify((r, x), equation, 'numpy')
     df = sp.lambdify((r, x), sp.diff(equation, x), 'numpy')
 
@@ -186,14 +184,14 @@ def generate_data_single(*eq_data, mesh_size=1000, n_samples=10):
     return equation, data
 
 
-def generate_data(equations, mesh_size=1000, n_samples=10, use_mp=True):
-    map_func = partial(generate_data_single, mesh_size=mesh_size, n_samples=n_samples)
+def generate_data(equations, mesh_size=1000, n_samples=10, abs_param='', use_mp=True, quiet=False):
+    map_func = partial(generate_data_single, mesh_size=mesh_size, n_samples=n_samples, abs_params=abs_param)
     if use_mp:
         with WorkerPool(n_jobs=12) as pool:
-            pool_data = pool.map(map_func, equations,
-                                 progress_bar=True, progress_bar_options={'desc': 'Generating bifurcations'})
+            pool_data = pool.map(map_func, equations, progress_bar=not quiet,
+                                 progress_bar_options={'desc': 'Generating bifurcations'})
     else:
-        pool_data = map(map_func, tqdm(equations, desc='Generating bifurcations'))
+        pool_data = map(map_func, tqdm(equations, desc='Generating bifurcations', disable=quiet))
     equations, raw_data = zip(*pool_data)
     equations, raw_data = list(equations), list(raw_data)
 
@@ -226,20 +224,44 @@ def generate_data(equations, mesh_size=1000, n_samples=10, use_mp=True):
     return equations, index_data, curve_data
 
 
-if __name__ == '__main__':
-    # equations = generate_equations(['1', 'x**1', 'x**2', 'x**3'])
-    bases = ['a01', 'a02*r',
-             'a03*(x+b/4)', 'a04*r*(x+b/4)', 'a05*(x+b/4)**2', 'a06*r*(x+b/4)**2', 'a06*(x+b/4)**3', 'a07*r*(x+b/4)**3']
-    # 'a08*sin(2*c01*(x+b/4))', 'a09*r*sin(2*c02*(x+b/4))',
-    # 'a10*sin(2*c03*r*(x+b/4))', 'a11*r*sin(2*c04*r*(x+b/4))']
+def generate_dataset(data_file, eq_file, n_duplicates=1, use_mp=True):
+    from transformer_train import simulate
+    bases = ['a01', 'a02*r', 'a03*(x+b/2)', 'a04*r*(x+b/2)', 'a05*(x+b/2)**2',
+             'a06*r*(x+b/2)**2', 'a06*(x+b/2)**3', 'a07*r*(x+b/2)**3']
     params = ['a01', 'a02', 'a03', 'a04', 'a05', 'a06', 'a07', 'a08', 'a09', 'a10', 'a11',
               'b', 'c01', 'c02', 'c03', 'c04']
-    equations = generate_equations(bases, params, append='-0.01*x**5')
+    equations = generate_equations(bases, params, append='-0.01*x**5') * n_duplicates
+    equations, curve_index_data, curve_data = generate_data(equations, use_mp=use_mp)
+
+    map_func = partial(simulate, n=200, n_simul=256)
+    if use_mp:
+        with WorkerPool(n_jobs=12) as pool:
+            data = pool.map(map_func, equations,
+                            progress_bar=True, progress_bar_options={'desc': 'Simulating systems'})
+    else:
+        data = map(map_func, tqdm(equations, desc='Simulating systems'))
+    simul_data, par_data = list(zip(*data))
+    simul_data, par_data = np.stack(simul_data), np.stack(par_data)
+    data = (simul_data, par_data, curve_index_data, curve_data)
+    np.savez(data_file, *data)
+    equations = [sp.pretty(eq, use_unicode=False) for eq in equations]
+    pickle.dump(equations, open(eq_file, 'wb'))
+
+if __name__ == '__main__':
+    generate_dataset('dataset_500.npz', 'equations_500.pkl', n_duplicates=500, use_mp=True)
+    # equations = generate_equations(['1', 'x**1', 'x**2', 'x**3'])
+    # bases = ['a01', 'a02*r',
+    #          'a03*(x+b/4)', 'a04*r*(x+b/4)', 'a05*(x+b/4)**2', 'a06*r*(x+b/4)**2', 'a06*(x+b/4)**3', 'a07*r*(x+b/4)**3']
+    # # 'a08*sin(2*c01*(x+b/4))', 'a09*r*sin(2*c02*(x+b/4))',
+    # # 'a10*sin(2*c03*r*(x+b/4))', 'a11*r*sin(2*c04*r*(x+b/4))']
+    # params = ['a01', 'a02', 'a03', 'a04', 'a05', 'a06', 'a07', 'a08', 'a09', 'a10', 'a11',
+    #           'b', 'c01', 'c02', 'c03', 'c04']
+    # equations = generate_equations(bases, params, append='-0.01*x**5')
+    # # print(len(equations))
+    # # equations = [('a*r*x - b*x**2', 'a b')] * 1
+    # #
+    # data = generate_data(equations, use_mp=False)
     # print(len(equations))
-    # equations = [('a*r*x - b*x**2', 'a b')] * 1
-    #
-    data = generate_data(equations, use_mp=False)
-    print(len(equations))
     # points_dataframe = create_points_dataframe(data)
     # shape_dataframe = create_shape_dataframe(data, equations)
     # dataframe = points_dataframe.merge(shape_dataframe, on='shape')

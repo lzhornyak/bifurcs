@@ -73,7 +73,7 @@ class BifurcationPredictor(pl.LightningModule):
         # determine assignments
         assignments = []
         # cost_matrices = []
-        curve_loss, pred_loss = 0, 0
+        shape_loss, pred_loss, pos_loss, stab_loss = 0, 0, 0, 0
         for i in range(len(x)):
             if len(y[i]) > 0:
                 # params = x[i, :, 3:]
@@ -94,10 +94,18 @@ class BifurcationPredictor(pl.LightningModule):
                 assigment = linear_sum_assignment(cost_matrix.detach().cpu().numpy())
                 assignments.append(assigment)
 
-                curve_loss += F.mse_loss(x[i, assigment[1], 1:], y[i][assigment[0]])
+                pred = x[i, assigment[1], 1:]
+                targ = y[i][assigment[0]]
+                stab_loss = F.binary_cross_entropy_with_logits(pred[:, 0], targ[:, 0])
+                pos_loss = F.l1_loss(pred[:, 1:5], targ[:, 1:5])
+                shape_loss = F.l1_loss(pred[:, 5:], targ[:, 5:])
+
+                # curve_loss += F.mse_loss(x[i, assigment[1], 1:], y[i][assigment[0]])
             else:
                 assignments.append(([], []))
-        curve_loss /= len(x)
+        shape_loss /= len(x)
+        pos_loss /= len(x)
+        stab_loss /= len(x)
 
         # loss for the shape
         # shape_loss = []
@@ -146,37 +154,40 @@ class BifurcationPredictor(pl.LightningModule):
         #     stab_loss.append(nn.BCEWithLogitsLoss()(x[i, a[1], 5], y[i][:, 0]))
         # stab_loss = torch.stack(stab_loss).mean()
 
-        # return shape_loss, pred_loss, pos_loss, stab_loss
-        return curve_loss, pred_loss#, pos_loss, stab_loss
+        return shape_loss, pred_loss, pos_loss, stab_loss
+        # return curve_loss, pred_loss#, pos_loss, stab_loss
 
     def training_step(self, batch, batch_idx):
         simul, param, bifurcation = batch
 
         # random trajectory dropout
-        # if self.current_epoch > 100:
-        #     match np.random.rand():
-        #         case x if x > 0.8:
-        #             mask = np.random.rand(simul.shape[1]) > np.random.rand()
-        #             simul, param = simul[:, mask], param[:, mask]
-        #         case x if 0.8 > x > 0.6:
-        #             bounds = sorted(np.random.rand(2))
-        #             mask = torch.logical_and(param[0, :] > bounds[0], param[0, :] < bounds[1])
-        #             simul, param = simul[:, mask], param[:, mask]
+        if self.current_epoch > 0:
+            match np.random.rand():
+                case x if x > 0.8:
+                    mask = np.random.rand(simul.shape[1]) > np.random.rand()
+                    simul, param = simul[:, mask], param[:, mask]
+                case x if 0.6 < x < 0.8:
+                    bounds = sorted(np.random.rand(2))
+                    mask = torch.logical_and(param[0, :] > bounds[0], param[0, :] < bounds[1])
+                    simul, param = simul[:, mask], param[:, mask]
+                case x if 0.2 < x < 0.6:
+                    simul += torch.randn_like(simul) * torch.rand() * 0.5
+                    param += torch.randn_like(param) * torch.rand() * 0.5
             # case x if 0.5 > x > 0.25:
             #     bounds = sorted(np.random.rand(2))
             #     mask = torch.logical_and(simul[-1, :] > bounds[0], simul[-1, :] < bounds[1])
             #     simul, param = simul[:, mask], param[:, mask]
 
         x = self(simul, param)
-        curve_loss, pred_loss = self.loss(x, bifurcation)
-        # shape_loss, pred_loss, pos_loss, stab_loss = self.loss(x, bifurcation)
-        # loss = shape_loss + pred_loss + pos_loss + stab_loss * 0.05
-        loss = curve_loss + pred_loss
-        self.log("curve_loss", curve_loss, prog_bar=True)
-        # self.log("shape_loss", shape_loss, prog_bar=True)
+        # curve_loss, pred_loss = self.loss(x, bifurcation)
+        shape_loss, pred_loss, pos_loss, stab_loss = self.loss(x, bifurcation)
+        loss = shape_loss + pred_loss + pos_loss + stab_loss
+        # loss = curve_loss + pred_loss
+        # self.log("curve_loss", curve_loss, prog_bar=True)
+        self.log("shape_loss", shape_loss, prog_bar=True)
         self.log("pred_loss", pred_loss, prog_bar=True)
-        # self.log("pos_loss", pos_loss, prog_bar=True)
-        # self.log("stab_loss", stab_loss, prog_bar=True)
+        self.log("pos_loss", pos_loss, prog_bar=True)
+        self.log("stab_loss", stab_loss, prog_bar=True)
         return loss
 
     def configure_optimizers(self):
@@ -216,7 +227,7 @@ def create_bezier_vector(x0, x1, n=100):
 
 if __name__ == '__main__':
     try:
-        saved_data = np.load('dataset.npz')
+        saved_data = np.load('dataset_500.npz')
         data = [saved_data[key] for key in saved_data]
     # dataset = pickle.load(open('dataset.pkl', 'rb'))
     # dataset = pickle.load(open(r"C:\Users\Lukas\dataset.pkl", 'rb'))
@@ -254,7 +265,7 @@ if __name__ == '__main__':
     dataset = BifurcationData(*data)
     dataloader = DataLoader(dataset, batch_size=20, collate_fn=bifurcation_collate, num_workers=6, shuffle=True)
 
-    model = BifurcationPredictor()
-    # model = BifurcationPredictor().load_from_checkpoint('lightning_logs/version_10/checkpoints/epoch=108-step=138975.ckpt')
+    # model = BifurcationPredictor()
+    model = BifurcationPredictor().load_from_checkpoint('lightning_logs/version_11/epoch=295-step=377400.ckpt')
     trainer = pl.Trainer(max_epochs=10000, accelerator='gpu', gradient_clip_val=0.1)
     trainer.fit(model, dataloader)

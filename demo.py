@@ -1,7 +1,7 @@
 from pycobi import ODESystem
 import numpy as np
 import matplotlib.pyplot as plt
-from pyrates import CircuitTemplate
+from pyrates import CircuitTemplate, OperatorTemplate
 
 ode = ODESystem.from_yaml(
     "model_templates.neural_mass_models.qif.qif_sfa", auto_dir="~/auto/07p",
