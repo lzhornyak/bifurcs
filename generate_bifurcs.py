@@ -129,6 +129,13 @@ def unpack_bifurc_vector(vector):
     x = vector[5:] * (vector[4] - vector[3]) + vector[3]
     return unstable, r, x
 
+def unpack_bifurc_vectors(vectors):
+    branches = torch.zeros((len(vectors), len(vectors[0][2])))
+    bbox, stab, branch = vector
+    param = torch.linspace(bbox[0], bbox[1], len(branch))
+    branch = branch * (bbox[3] - bbox[2]) + vector[2]
+    return param, branch
+
 
 def generate_data_single(*eq_data, mesh_size=1000, n_samples=10, abs_params=''):
     # set up equation
